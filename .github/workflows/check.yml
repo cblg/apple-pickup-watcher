@@ -36,7 +36,7 @@ jobs:
       - name: Check availability
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: python iphone_finder.py --ci --repeat 5 --interval 60
+        run: python -u iphone_finder.py --ci --repeat 5 --interval 60
 
       - name: Commit updated last_seen.txt
         if: always()
