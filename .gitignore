@@ -1,0 +1,6 @@
+last_seen.txt
+__pycache__/
+*.pyc
+.env
+*.har
+deliveroo_alerts/
