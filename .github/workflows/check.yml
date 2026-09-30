@@ -2,11 +2,16 @@ name: Apple Store Availability
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # best-effort restarts; GitHub often skips these for hours
+    - cron: "*/5 * * * *"   # watchdog only; GitHub often skips these for hours
   workflow_dispatch:
+    inputs:
+      repeat:
+        description: "Checks per run (1/min)"
+        default: "340"
 
 permissions:
   contents: write             # needed to push state files
+  actions: write              # needed to re-dispatch itself
 
 env:
   MODEL: iPhone 18 Pro Max 512GB
@@ -50,7 +55,7 @@ jobs:
           PARTS: ${{ matrix.parts }}
           BUY_URL: ${{ matrix.buy_url }}
           STATE_FILE: last_seen_${{ matrix.name }}.txt
-        run: python -u iphone_finder.py --ci --repeat 340 --interval 60   # ≈5h45, must end before the timeout
+        run: python -u iphone_finder.py --ci --repeat ${{ inputs.repeat || 340 }} --interval 60   # 340 ≈ 5h45, must end before the timeout
 
       - name: Commit updated state
         if: always()
@@ -61,3 +66,14 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "chore: update ${{ matrix.name }} state [skip ci]"
           for i in 1 2 3; do git pull --rebase -q && git push -q && break; sleep 5; done
+
+  # workflow_dispatch is the one event GITHUB_TOKEN may trigger. Skipped on failure/cancel so a broken
+  # check can't loop; the cron watchdog restarts the chain later.
+  restart:
+    needs: check
+    if: needs.check.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh workflow run check.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
