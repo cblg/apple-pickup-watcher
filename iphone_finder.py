@@ -11,8 +11,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-# Config (override via env). PARTS format: "PART=Label,PART=Label"
-STORE = os.environ.get("STORE", "R275")
+# Config (override via env). STORES: "R001,R002". PARTS: "PART=Label,PART=Label". LOCALE "" = US store.
+STORES = os.environ.get("STORES", "R275").split(",")
 LOCALE = os.environ.get("LOCALE", "ch-fr")
 MODEL = os.environ.get("MODEL", "iPhone 18 Pro Max 512GB")
 PARTS = dict(
@@ -21,11 +21,12 @@ PARTS = dict(
         "PARTS", "MJXT4QL/A=Black,MJXV4QL/A=Burgundy,MJXW4QL/A=Glacier,MJXU4QL/A=Silver"
     ).split(",")
 )
-BUY_URL = os.environ.get("BUY_URL", f"https://www.apple.com/{LOCALE}/shop/buy-iphone")
+SHOP = f"https://www.apple.com{'/' + LOCALE if LOCALE else ''}/shop"
+BUY_URL = os.environ.get("BUY_URL", f"{SHOP}/buy-iphone")
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
+STATE_FILE = os.environ.get("STATE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_seen.txt"))
 
-PICKUP_URL = f"https://www.apple.com/{LOCALE}/shop/retail/pickup-message"
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_seen.txt")
+PICKUP_URL = f"{SHOP}/retail/pickup-message"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0 Safari/537.36",
@@ -46,16 +47,24 @@ def fetch(url, params=None):
 
 
 def check():
-    params = {"pl": "true", "store": STORE}
-    params.update({f"parts.{i}": p for i, p in enumerate(PARTS)})
-    data = json.loads(fetch(PICKUP_URL, params))
-    store = next(s for s in data["body"]["stores"] if s["storeNumber"] == STORE)
-    return store, store["partsAvailability"]
+    """Return [(store, partsAvailability)] for every store in STORES."""
+    results = []
+    for number in STORES:
+        params = {"pl": "true", "store": number}
+        params.update({f"parts.{i}": p for i, p in enumerate(PARTS)})
+        data = json.loads(fetch(PICKUP_URL, params))
+        store = next(s for s in data["body"]["stores"] if s["storeNumber"] == number)
+        results.append((store, store["partsAvailability"]))
+    return results
 
 
 def status(avail, part):
     a = avail.get(part, {})
     return a.get("pickupDisplay", "unknown"), a.get("pickupSearchQuote", "—").replace("\xa0", " ")
+
+
+def key(store, label):
+    return f"{store['storeName']}: {label}"
 
 
 def notify_local(title, msg):
@@ -65,27 +74,33 @@ def notify_local(title, msg):
                        check=False, capture_output=True)
 
 
-def send_discord(store, avail, new, gone):
-    fields = []
-    for part, label in PARTS.items():
-        state, quote = status(avail, part)
-        icon = {"available": "✅", "unavailable": "❌"}.get(state, "⚠️")
-        tag = " 🆕" if label in new else ""
-        fields.append({"name": f"{SWATCH.get(label, '◻️')} {label}{tag}", "value": f"{icon} {quote}", "inline": True})
-    desc = f"**{', '.join(sorted(new))}** available for pickup at **Apple {store['storeName']}**"
-    if gone:
-        desc += f"\n*No longer available: {', '.join(sorted(gone))}*"
-    embed = {
-        "title": f"📱 {MODEL} in stock",
-        "description": desc,
-        "color": 0x34C759,
-        "fields": fields[:25],
-        "footer": {"text": f"Checked • {datetime.now().astimezone():%d/%m/%Y %H:%M %Z}"},
-        "url": BUY_URL,
-    }
+def send_discord(results, new, gone):
+    embeds = []
+    for store, avail in results:
+        store_new = sorted(label for label in PARTS.values() if key(store, label) in new)
+        if not store_new:
+            continue
+        fields = []
+        for part, label in PARTS.items():
+            state, quote = status(avail, part)
+            icon = {"available": "✅", "unavailable": "❌"}.get(state, "⚠️")
+            tag = " 🆕" if label in store_new else ""
+            fields.append({"name": f"{SWATCH.get(label, '◻️')} {label}{tag}", "value": f"{icon} {quote}", "inline": True})
+        desc = f"**{', '.join(store_new)}** available for pickup at **Apple {store['storeName']}**, {store.get('city', '')}"
+        store_gone = sorted(g.split(": ", 1)[1] for g in gone if g.startswith(f"{store['storeName']}: "))
+        if store_gone:
+            desc += f"\n*No longer available: {', '.join(store_gone)}*"
+        embeds.append({
+            "title": f"📱 {MODEL} in stock",
+            "description": desc,
+            "color": 0x34C759,
+            "fields": fields[:25],
+            "footer": {"text": f"Checked • {datetime.now().astimezone():%d/%m/%Y %H:%M %Z}"},
+            "url": BUY_URL,
+        })
     req = urllib.request.Request(
         WEBHOOK,
-        data=json.dumps({"embeds": [embed]}).encode(),
+        data=json.dumps({"embeds": embeds[:10]}).encode(),
         headers={"Content-Type": "application/json", "User-Agent": HEADERS["User-Agent"]},
         method="POST",
     )
@@ -93,28 +108,30 @@ def send_discord(store, avail, new, gone):
         print(f"  Discord response: {r.status}")
 
 
-def render(store, avail):
+def render(results):
+    """Print one box per store; return the set of available `key(store, label)`."""
     now = datetime.now().strftime("%a %d %b %Y · %H:%M:%S")
     w = 64
-    where = f"Apple {store['storeName']}, {store.get('city', '')}"
-    print(f"\n{C['b']}╭{'─' * w}╮")
-    print(f"│ 📱 {MODEL:<{w - 4}}│")
-    print(f"│ 📍 {where:<{w - 4}}│")
-    print(f"│ {C['d']}🕒 {now:<{w - 4}}{C['x']}{C['b']}│")
-    print(f"├{'─' * w}┤{C['x']}")
     available = set()
-    for part, label in PARTS.items():
-        state, quote = status(avail, part)
-        if state == "available":
-            icon, col = "✅", C["g"]
-            available.add(label)
-        elif state == "unavailable":
-            icon, col = "❌", C["r"]
-        else:
-            icon, col = "⚠️ ", C["y"]
-        name = f"{SWATCH.get(label, '◻️')} {label:<10} {part:<10}"
-        print(f"{C['b']}│{C['x']} {name} {icon} {col}{quote[:w - 30]:<{w - 30}}{C['x']}{C['b']}│{C['x']}")
-    print(f"{C['b']}╰{'─' * w}╯{C['x']}")
+    for store, avail in results:
+        where = f"Apple {store['storeName']}, {store.get('city', '')}"
+        print(f"\n{C['b']}╭{'─' * w}╮")
+        print(f"│ 📱 {MODEL:<{w - 4}}│")
+        print(f"│ 📍 {where:<{w - 4}}│")
+        print(f"│ {C['d']}🕒 {now:<{w - 4}}{C['x']}{C['b']}│")
+        print(f"├{'─' * w}┤{C['x']}")
+        for part, label in PARTS.items():
+            state, quote = status(avail, part)
+            if state == "available":
+                icon, col = "✅", C["g"]
+                available.add(key(store, label))
+            elif state == "unavailable":
+                icon, col = "❌", C["r"]
+            else:
+                icon, col = "⚠️ ", C["y"]
+            name = f"{SWATCH.get(label, '◻️')} {label:<10} {part:<10}"
+            print(f"{C['b']}│{C['x']} {name} {icon} {col}{quote[:w - 30]:<{w - 30}}{C['x']}{C['b']}│{C['x']}")
+        print(f"{C['b']}╰{'─' * w}╯{C['x']}")
     return available
 
 
@@ -125,9 +142,9 @@ def load_state():
         return {line.strip() for line in f if line.strip()}
 
 
-def save_state(labels):
+def save_state(keys):
     with open(STATE_FILE, "w") as f:
-        f.write("".join(f"{c}\n" for c in sorted(labels)))
+        f.write("".join(f"{k}\n" for k in sorted(keys)))
 
 
 def run_ci(repeat, interval):
@@ -137,16 +154,16 @@ def run_ci(repeat, interval):
         if i:
             time.sleep(interval)
         try:
-            store, avail = check()
+            results = check()
         except Exception as e:
             failures += 1
             print(f"! {datetime.now():%H:%M:%S} check failed: {e}", file=sys.stderr)
             continue
-        now_avail = render(store, avail)
+        now_avail = render(results)
         new, gone = now_avail - last, last - now_avail
         if new:
             if WEBHOOK:
-                send_discord(store, avail, new, gone)
+                send_discord(results, new, gone)
             else:
                 print("  ⚠️  DISCORD_WEBHOOK not set — skipping notification.")
         last = now_avail
@@ -168,8 +185,7 @@ def main():
     last = set()
     while True:
         try:
-            store, avail = check()
-            now_avail = render(store, avail)
+            now_avail = render(check())
             if now_avail - last:
                 notify_local(f"{MODEL} in stock", ", ".join(sorted(now_avail - last)))
             last = now_avail

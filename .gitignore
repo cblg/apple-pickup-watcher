@@ -1,4 +1,4 @@
-last_seen.txt
+last_seen*.txt
 __pycache__/
 *.pyc
 .env

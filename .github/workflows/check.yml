@@ -6,24 +6,33 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write             # needed to push last_seen.txt
-
-concurrency:
-  group: check
-  cancel-in-progress: false
+  contents: write             # needed to push state files
 
 env:
-  STORE: R275
-  LOCALE: ch-fr
   MODEL: iPhone 18 Pro Max 512GB
-  PARTS: MJXT4QL/A=Black,MJXV4QL/A=Burgundy,MJXW4QL/A=Glacier,MJXU4QL/A=Silver
-  BUY_URL: https://www.apple.com/ch-fr/shop/buy-iphone/iphone-18-pro
   TZ: Europe/Zurich
 
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 360        # GitHub-hosted job maximum
+    concurrency:
+      group: check-${{ matrix.name }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ch
+            stores: R275            # Rue de Rive, Genève
+            locale: ch-fr
+            parts: MJXT4QL/A=Black,MJXV4QL/A=Burgundy,MJXW4QL/A=Glacier,MJXU4QL/A=Silver
+            buy_url: https://www.apple.com/ch-fr/shop/buy-iphone/iphone-18-pro
+          - name: us
+            stores: R035,R284       # Michigan Avenue, Lincoln Park (Chicago)
+            locale: ""
+            parts: MJW84LL/A=Black,MJWA4LL/A=Burgundy,MJWC4LL/A=Glacier,MJW94LL/A=Silver
+            buy_url: https://www.apple.com/shop/buy-iphone/iphone-18-pro
     steps:
       - uses: actions/checkout@v4
 
@@ -36,13 +45,19 @@ jobs:
       - name: Check availability
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          STORES: ${{ matrix.stores }}
+          LOCALE: ${{ matrix.locale }}
+          PARTS: ${{ matrix.parts }}
+          BUY_URL: ${{ matrix.buy_url }}
+          STATE_FILE: last_seen_${{ matrix.name }}.txt
         run: python -u iphone_finder.py --ci --repeat 340 --interval 60   # ≈5h45, must end before the timeout
 
-      - name: Commit updated last_seen.txt
+      - name: Commit updated state
         if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f last_seen.txt 2>/dev/null || exit 0
-          git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
-          git push
+          git add -f last_seen_${{ matrix.name }}.txt 2>/dev/null || exit 0
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: update ${{ matrix.name }} state [skip ci]"
+          for i in 1 2 3; do git pull --rebase -q && git push -q && break; sleep 5; done
