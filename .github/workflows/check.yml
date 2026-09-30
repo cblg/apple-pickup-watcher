@@ -2,7 +2,7 @@ name: Apple Store Availability
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # GitHub minimum; each run checks 5× (≈ every minute)
+    - cron: "*/5 * * * *"   # best-effort restarts; GitHub often skips these for hours
   workflow_dispatch:
 
 permissions:
@@ -23,7 +23,7 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 360        # GitHub-hosted job maximum
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +36,7 @@ jobs:
       - name: Check availability
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: python -u iphone_finder.py --ci --repeat 5 --interval 60
+        run: python -u iphone_finder.py --ci --repeat 340 --interval 60   # ≈5h45, must end before the timeout
 
       - name: Commit updated last_seen.txt
         if: always()
